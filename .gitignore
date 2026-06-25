@@ -21,3 +21,4 @@ histortyoldchat.txt
 *.log
 *.jsonl
 /logs/
+/dist/

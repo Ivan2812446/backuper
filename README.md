@@ -49,30 +49,55 @@
 Стек: **Go**, SQLite (`modernc.org/sqlite`, WAL), ротация логов (`lumberjack`),
 почта через стандартный `net/smtp`.
 
-## Быстрый старт
+## Установка одной командой
+
+Установщик сам скачивает готовый бинарник из
+[GitHub Release](https://github.com/Ivan2812446/backuper/releases/latest)
+(под нужную ОС/архитектуру), создаёт пользователя и каталоги, пишет `.env`,
+регистрирует службу (systemd / Windows Service) и запускает её. По одному скрипту
+на ОС, каждый — для обеих ролей (`server` и `client`).
+
+### Linux (Debian-семейство), от root
 
 ```bash
-# 1. Сборка (нужен Go; CGO не требуется)
-make build                      # бинарники в ./bin
-# кросс под Windows:
-make build-windows
+# СЕРВЕР — сразу с паролями и адресом клиента: сгенерирует сертификаты и запустится
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh \
+  | sudo OWN_PASSWORD='пароль-сервера-не-короче-24' PEER_PASSWORD='пароль-клиента-не-короче-24' \
+         CLIENT_HOST=192.168.1.50 bash -s server
 
-# 2. Сертификаты (один раз). SAN client.crt = адрес клиента в LAN.
-bin/backuper-server gen-certs -out certs -client-host 192.168.1.50 -server-host 192.168.1.10
-# серверу: ca.crt + server.crt + server.key ; клиенту: ca.crt + client.crt + client.key
-
-# 3. Конфигурация — заполните по примерам
-cp .env.server.example /etc/backuper/.env   # на сервере
-cp .env.client.example /etc/backuper/.env   # на клиенте
-
-# 4. Проверка и запуск
-backuper-server check-config && backuper-server dry-run
-backuper-client run    # на клиенте (служба-слушатель)
-backuper-server run    # на сервере (планировщик циклов)
+# КЛИЕНТ
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh \
+  | sudo OWN_PASSWORD='пароль-клиента-не-короче-24' PEER_PASSWORD='пароль-сервера-не-короче-24' \
+         BACKUP_DIR=/data bash -s client
 ```
 
-Установка как службы (Linux): `sudo deploy/install.sh server|client`.
-Windows: `deploy/install.ps1 -Role server|client`. Подробно — [DEPLOY.md](DEPLOY.md).
+После установки сервера скопируйте на клиента три файла:
+`/etc/backuper/certs/{ca.crt,client.crt,client.key}` → в тот же каталог на клиенте,
+затем `systemctl enable --now backuper-client`.
+Можно запускать и без переменных — установщик всё поставит и подскажет, что
+дописать в `/etc/backuper/.env`. (`wget` тоже поддерживается вместо `curl`.)
+
+### Windows 10+ (PowerShell от администратора)
+
+```powershell
+iwr https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.ps1 -OutFile "$env:TEMP\binst.ps1"
+# СЕРВЕР
+& "$env:TEMP\binst.ps1" -Role server -ClientHost 192.168.1.50 -OwnPassword 'пароль-сервера' -PeerPassword 'пароль-клиента'
+# КЛИЕНТ
+& "$env:TEMP\binst.ps1" -Role client -BackupDir C:\Data -OwnPassword 'пароль-клиента' -PeerPassword 'пароль-сервера'
+```
+
+### Сборка из исходников (альтернатива)
+
+```bash
+make build                  # бинарники в ./bin (нужен Go; CGO не требуется)
+make build-windows          # кросс под Windows
+bin/backuper-server gen-certs -out certs -client-host 192.168.1.50 -server-host 192.168.1.10
+cp .env.server.example /etc/backuper/.env   # заполнить
+backuper-server check-config && backuper-server dry-run
+```
+
+Подробное руководство (обновление, ротация ключей, ручной перенос 4 ТБ) — [DEPLOY.md](DEPLOY.md).
 
 ## CLI
 
@@ -183,29 +208,51 @@ Designed for scale: ~**1M files / 4 TB** without loading the whole index into me
 Stack: **Go**, SQLite (`modernc.org/sqlite`, WAL), log rotation (`lumberjack`),
 mail via the standard `net/smtp`.
 
-## Quick start
+## One-command install
+
+The installer downloads the right prebuilt binary from the
+[GitHub Release](https://github.com/Ivan2812446/backuper/releases/latest), creates
+the user and directories, writes `.env`, registers the service (systemd / Windows
+Service) and starts it. One script per OS, each handling both roles.
+
+### Linux (Debian family), as root
 
 ```bash
-# 1. Build (Go required; no CGO)
-make build                      # binaries in ./bin
-make build-windows              # cross-compile for Windows
+# SERVER — with passwords and the client address: also generates certs and starts
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh \
+  | sudo OWN_PASSWORD='server-pass-min-24' PEER_PASSWORD='client-pass-min-24' \
+         CLIENT_HOST=192.168.1.50 bash -s server
 
-# 2. Certificates (once). client.crt SAN = the client's LAN address.
-bin/backuper-server gen-certs -out certs -client-host 192.168.1.50 -server-host 192.168.1.10
-# server gets: ca.crt + server.crt + server.key ; client gets: ca.crt + client.crt + client.key
-
-# 3. Configuration — fill in from the examples
-cp .env.server.example /etc/backuper/.env   # on the server
-cp .env.client.example /etc/backuper/.env   # on the client
-
-# 4. Verify and run
-backuper-server check-config && backuper-server dry-run
-backuper-client run     # on the client (listener service)
-backuper-server run     # on the server (cycle scheduler)
+# CLIENT
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh \
+  | sudo OWN_PASSWORD='client-pass-min-24' PEER_PASSWORD='server-pass-min-24' \
+         BACKUP_DIR=/data bash -s client
 ```
 
-Install as a service (Linux): `sudo deploy/install.sh server|client`.
-Windows: `deploy/install.ps1 -Role server|client`. See [DEPLOY.md](DEPLOY.md).
+After the server install, copy `/etc/backuper/certs/{ca.crt,client.crt,client.key}`
+to the same directory on the client, then `systemctl enable --now backuper-client`.
+You may also run it without env vars — the installer sets everything up and tells
+you what to fill into `/etc/backuper/.env`. (`wget` works too if `curl` is absent.)
+
+### Windows 10+ (PowerShell as Administrator)
+
+```powershell
+iwr https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.ps1 -OutFile "$env:TEMP\binst.ps1"
+& "$env:TEMP\binst.ps1" -Role server -ClientHost 192.168.1.50 -OwnPassword 'server-pass' -PeerPassword 'client-pass'
+& "$env:TEMP\binst.ps1" -Role client -BackupDir C:\Data -OwnPassword 'client-pass' -PeerPassword 'server-pass'
+```
+
+### Build from source (alternative)
+
+```bash
+make build                  # binaries in ./bin (Go required; no CGO)
+make build-windows
+bin/backuper-server gen-certs -out certs -client-host 192.168.1.50 -server-host 192.168.1.10
+cp .env.server.example /etc/backuper/.env   # fill in
+backuper-server check-config && backuper-server dry-run
+```
+
+Full guide (upgrades, key rotation, the 4 TB manual seed) — [DEPLOY.md](DEPLOY.md).
 
 ## CLI
 
