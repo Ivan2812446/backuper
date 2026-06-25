@@ -98,6 +98,11 @@ have_pw=0; [[ -n "$OWN_PASSWORD" && -n "$PEER_PASSWORD" ]] && have_pw=1
 
 if [[ -f "$ENV_FILE" ]]; then
 	warn ".env уже существует — оставлен без изменений: $ENV_FILE"
+	# авто-починка прежнего бага: LOCK_FILE в /var/run недоступен пользователю backuper
+	if [[ "$ROLE" == "server" ]] && grep -q '^LOCK_FILE=/var/run' "$ENV_FILE"; then
+		sed -i "s#^LOCK_FILE=.*#LOCK_FILE=$LIB_DIR/backuper.lock#" "$ENV_FILE"
+		warn "исправлен LOCK_FILE → $LIB_DIR/backuper.lock (прежний /var/run недоступен службе)"
+	fi
 else
 	if [[ "$ROLE" == "server" ]]; then
 		cat > "$ENV_FILE" <<EOF
@@ -124,7 +129,7 @@ SMTP_PASSWORD=${SMTP_PASSWORD:-}
 LOG_DIR=$LOG_DIR
 AUDIT_LOG=$LOG_DIR/audit.jsonl
 STATE_DB=$LIB_DIR/state.db
-LOCK_FILE=/var/run/backuper.lock
+LOCK_FILE=$LIB_DIR/backuper.lock
 LOG_LEVEL=INFO
 TIMEZONE=Europe/Moscow
 EOF

@@ -114,6 +114,20 @@ func TestLoadServerMissingRequired(t *testing.T) {
 	}
 }
 
+func TestLoadServerWithBOM(t *testing.T) {
+	// .env с UTF-8 BOM (как пишет Windows PowerShell/Блокнот) должен читаться
+	cfg, err := LoadServer(writeEnv(t, "\ufeff"+minimalServerEnv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ClientHost != "10.0.0.2" {
+		t.Fatalf("BOM сломал первую переменную: ClientHost=%q", cfg.ClientHost)
+	}
+	if len(cfg.parseProblems) != 0 {
+		t.Fatalf("проблемы при BOM: %v", cfg.parseProblems)
+	}
+}
+
 func TestEnvOverride(t *testing.T) {
 	t.Setenv("CLIENT_PORT", "12345")
 	cfg, err := LoadServer(writeEnv(t, minimalServerEnv+"CLIENT_PORT=9000\n"))

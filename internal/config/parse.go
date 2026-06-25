@@ -25,7 +25,8 @@ func loadEnvFile(path string) (map[string]string, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+		line := strings.TrimPrefix(sc.Text(), "\ufeff") // срезаем UTF-8 BOM (Windows/Блокнот)
+		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}

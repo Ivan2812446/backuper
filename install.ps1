@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Backuper — установщик «всё в одном» для Windows 10+.
     Сам скачивает готовый .exe с GitHub Release и регистрирует службу Windows.
