@@ -1,0 +1,19 @@
+[Unit]
+Description=Backuper client (TLS listener, backup source)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=backuper
+Group=backuper
+EnvironmentFile=-/etc/backuper/.env
+WorkingDirectory=/var/log/backuper
+ExecStart=/usr/local/bin/backuper-client run
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

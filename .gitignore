@@ -1,0 +1,23 @@
+# Сборка
+/bin/
+*.exe
+*.test
+
+# Локальная переписка / черновики (не публиковать)
+histortyoldchat.txt
+
+# Реальные секреты и состояние (в репозиторий не попадают; есть .env.*.example)
+.env
+/certs/
+*.key
+*.crt
+*.db
+*.db-wal
+*.db-shm
+*.part
+*.meta
+
+# Логи
+*.log
+*.jsonl
+/logs/

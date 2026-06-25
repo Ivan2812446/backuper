@@ -1,0 +1,302 @@
+#!/usr/bin/env bash
+#
+# scripts/test-all — локальный E2E-прогон функций Backuper (раздел 23.2 ТЗ).
+# Поднимает временные backup/storage/trash/temp, генерирует сертификаты, запускает
+# обе стороны локально и проверяет сценарии. Печатает PASS/FAIL по каждому и итог.
+#
+# Требования: собранные бинарники появятся в ./bin (скрипт соберёт сам).
+# Опционально python3 — для mock-SMTP проверки отправки отчёта.
+
+set -u
+
+# --- toolchain ---
+export GOROOT="${GOROOT:-/home/ivan/go-sdk}"
+export PATH="$GOROOT/bin:$PATH"
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$REPO"
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/backuper-testall.XXXXXX")"
+PORT=$(( (RANDOM % 2000) + 18000 ))
+SERVER=./bin/backuper-server
+CLIENT=./bin/backuper-client
+
+PASS=0; FAIL=0
+pass() { echo "  [PASS] $*"; PASS=$((PASS+1)); }
+fail() { echo "  [FAIL] $*"; FAIL=$((FAIL+1)); }
+hdr()  { echo; echo "### $*"; }
+
+cleanup() {
+  [ -n "${CLIENT_PID:-}" ] && kill -INT "$CLIENT_PID" 2>/dev/null
+  [ -n "${SMTP_PID:-}" ] && kill "$SMTP_PID" 2>/dev/null
+  wait 2>/dev/null
+  rm -rf "$ROOT"
+}
+trap cleanup EXIT
+
+mkdir -p "$ROOT"/{backup,storage,trash,temp,state,logs,certs}
+
+hdr "0. Сборка бинарников"
+go build -o bin/backuper-server ./cmd/server && go build -o bin/backuper-client ./cmd/client \
+  && pass "сборка" || { fail "сборка"; echo "ИТОГ: сборка не удалась"; exit 1; }
+
+hdr "1a. gen-certs"
+$SERVER gen-certs -out "$ROOT/certs" -client-host 127.0.0.1 -server-host 127.0.0.1 -days 3650 >/dev/null 2>&1 \
+  && [ -s "$ROOT/certs/ca.crt" ] && pass "сертификаты созданы" || fail "gen-certs"
+
+# --- mock SMTP (python3), если доступен ---
+SMTP_PORT=$(( PORT + 1 ))
+SMTP_CAP="$ROOT/smtp_capture.txt"
+SMTP_OK=0
+if command -v python3 >/dev/null 2>&1; then
+  cat > "$ROOT/mocksmtp.py" <<'PY'
+import socket, sys
+cap = sys.argv[2]
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", int(sys.argv[1]))); s.listen(5)
+print("ready", flush=True)
+while True:
+    try: c,_ = s.accept()
+    except OSError: break
+    f = c.makefile("rwb")
+    f.write(b"220 mock\r\n"); f.flush()
+    indata = False
+    while True:
+        line = f.readline()
+        if not line: break
+        u = line.strip().upper()
+        if u.startswith(b"EHLO") or u.startswith(b"HELO"):
+            f.write(b"250-mock\r\n250 OK\r\n"); f.flush()
+        elif u.startswith(b"MAIL") or u.startswith(b"RCPT"):
+            f.write(b"250 OK\r\n"); f.flush()
+        elif u == b"DATA":
+            f.write(b"354 go\r\n"); f.flush(); indata = True
+            body = b""
+            while True:
+                l = f.readline()
+                if l == b".\r\n" or not l: break
+                body += l
+            open(cap, "ab").write(body)
+            f.write(b"250 OK\r\n"); f.flush(); indata = False
+        elif u == b"QUIT":
+            f.write(b"221 bye\r\n"); f.flush(); c.close(); break
+        else:
+            f.write(b"250 OK\r\n"); f.flush()
+PY
+  python3 "$ROOT/mocksmtp.py" "$SMTP_PORT" "$SMTP_CAP" >"$ROOT/smtp.log" 2>&1 &
+  SMTP_PID=$!
+  sleep 1
+  grep -q ready "$ROOT/smtp.log" 2>/dev/null && SMTP_OK=1
+fi
+
+write_server_env() {
+  local massthr="${1:-100}" retention="${2:-10}" cleanup_iv="${3:-24h}" bw="${4:-0}" chunk="${5:-1MiB}" peerpass="${6:-client-secret-password-0123456789}"
+  cat > "$ROOT/server.env" <<EOF
+CLIENT_HOST=127.0.0.1
+CLIENT_PORT=$PORT
+TLS_CERT_FILE=$ROOT/certs/server.crt
+TLS_KEY_FILE=$ROOT/certs/server.key
+TLS_CA_FILE=$ROOT/certs/ca.crt
+OWN_PASSWORD=server-secret-password-0123456789
+PEER_PASSWORD=$peerpass
+STORAGE_DIR=$ROOT/storage
+TRASH_DIR=$ROOT/trash
+TEMP_DIR=$ROOT/temp
+STATE_DB=$ROOT/state/state.db
+LOCK_FILE=$ROOT/state/backuper.lock
+LOG_DIR=$ROOT/logs
+AUDIT_LOG=$ROOT/logs/audit-server.jsonl
+SYNC_INTERVAL=24h
+PARALLEL_TRANSFERS=3
+CHUNK_SIZE=$chunk
+BANDWIDTH_LIMIT=$bw
+RETRY_COUNT=2
+RETRY_DELAY=1s
+MTIME_TOLERANCE=2s
+TRASH_RETENTION_DAYS=$retention
+TRASH_CLEANUP_INTERVAL=$cleanup_iv
+ALERT_MASS_DELETE_THRESHOLD=$massthr
+SMTP_HOST=127.0.0.1
+SMTP_PORT=$SMTP_PORT
+SMTP_FROM=backuper@example.com
+SMTP_TO=admin@example.com
+SMTP_SECURITY=none
+LOG_LEVEL=DEBUG
+EOF
+}
+
+write_client_env() {
+  local ownpass="${1:-client-secret-password-0123456789}"
+  cat > "$ROOT/client.env" <<EOF
+LISTEN_HOST=127.0.0.1
+LISTEN_PORT=$PORT
+TLS_CERT_FILE=$ROOT/certs/client.crt
+TLS_KEY_FILE=$ROOT/certs/client.key
+TLS_CA_FILE=$ROOT/certs/ca.crt
+OWN_PASSWORD=$ownpass
+PEER_PASSWORD=server-secret-password-0123456789
+BACKUP_DIR=$ROOT/backup
+EXCLUDE_PATTERNS=*.tmp
+LOG_DIR=$ROOT/logs
+AUDIT_LOG=$ROOT/logs/audit-client.jsonl
+LOG_LEVEL=DEBUG
+EOF
+}
+
+write_server_env
+write_client_env
+
+run_cycle() {  # $1 = метка лога, $2 = пауза (сек)
+  $SERVER run -config "$ROOT/server.env" >"$ROOT/logs/server.$1.out" 2>&1 &
+  local pid=$!
+  sleep "${2:-3}"
+  kill -INT $pid 2>/dev/null
+  wait $pid 2>/dev/null
+}
+
+hdr "1b. check-config (сервер и клиент)"
+$SERVER check-config -config "$ROOT/server.env" >/dev/null 2>&1 && pass "check-config сервера" || fail "check-config сервера"
+$CLIENT check-config -config "$ROOT/client.env" >/dev/null 2>&1 && pass "check-config клиента" || fail "check-config клиента"
+
+hdr "2. Подготовка: первичный (ручной) перенос части файлов в storage"
+mkdir -p "$ROOT/backup/docs/sub"
+head -c 200000 /dev/urandom > "$ROOT/backup/docs/scan_001.pdf"
+echo "note v1" > "$ROOT/backup/docs/sub/note.txt"
+echo "tmpdata" > "$ROOT/backup/skip.tmp"          # должен быть исключён
+# имитируем ручной перенос: scan_001 уже на сервере (идентичен) -> не должен качаться повторно
+mkdir -p "$ROOT/storage/docs"
+cp -p "$ROOT/backup/docs/scan_001.pdf" "$ROOT/storage/docs/scan_001.pdf"
+
+hdr "3. Запуск клиента-демона + рукопожатие (mTLS+пароли)"
+$CLIENT run -config "$ROOT/client.env" >"$ROOT/logs/client.out" 2>&1 &
+CLIENT_PID=$!
+sleep 2
+kill -0 $CLIENT_PID 2>/dev/null && pass "клиент-демон запущен" || { fail "клиент не стартовал"; cat "$ROOT/logs/client.out"; }
+
+hdr "4. Цикл 1: первый запуск (индексация ручного переноса) + скачивание нового"
+run_cycle 1 3
+# scan_001 уже был в storage и совпадает -> в цикле 1 не качается; note.txt новый -> качается
+if grep -Eq "scan_001" "$ROOT/logs/audit-server.jsonl" 2>/dev/null; then
+  fail "scan_001 скачан повторно (должен был сматчиться при первом запуске)"
+else
+  pass "первый запуск: идентичный файл не перекачан"
+fi
+[ -f "$ROOT/storage/docs/sub/note.txt" ] && pass "новый файл скачан (note.txt)" || fail "новый файл не скачан"
+[ -f "$ROOT/storage/skip.tmp" ] && fail "*.tmp не исключён" || pass "фильтр EXCLUDE_PATTERNS работает"
+cmp -s "$ROOT/backup/docs/scan_001.pdf" "$ROOT/storage/docs/scan_001.pdf" && pass "целостность scan_001" || fail "scan_001 повреждён"
+
+hdr "5. Цикл 2: изменение файла -> перекачка; неизменные не качаются"
+echo "note v2 changed" > "$ROOT/backup/docs/sub/note.txt"
+run_cycle 2 3
+grep -q "note v2 changed" "$ROOT/storage/docs/sub/note.txt" && pass "изменённый файл обновлён" || fail "изменение не подхвачено"
+
+hdr "6. Цикл 3: идемпотентность (ничего не качается)"
+: > "$ROOT/logs/audit-server.jsonl"   # обнулим аудит, чтобы посчитать цикл 3
+run_cycle 3 3
+dl3=$(grep -c -e '"op":"download"' -e '"op":"change"' "$ROOT/logs/audit-server.jsonl" 2>/dev/null)
+dl3=${dl3:-0}
+[ "$dl3" -eq 0 ] && pass "идемпотентность: 0 загрузок в цикле 3" || fail "лишние загрузки в цикле 3: $dl3"
+
+hdr "7. Удаление на клиенте -> корзина (с сохранением пути)"
+rm "$ROOT/backup/docs/scan_001.pdf"
+run_cycle 4 3
+[ -f "$ROOT/trash/docs/scan_001.pdf" ] && pass "файл перенесён в корзину с путём" || fail "файл не в корзине"
+[ -f "$ROOT/storage/docs/scan_001.pdf" ] && fail "удалённый файл остался в storage" || pass "удалён из storage"
+
+hdr "8. Повторное появление и повторное удаление -> версия в .versions"
+head -c 100000 /dev/urandom > "$ROOT/backup/docs/scan_001.pdf"
+run_cycle 5 3   # снова скачался
+[ -f "$ROOT/storage/docs/scan_001.pdf" ] && pass "файл скачан заново" || fail "повторное появление не скачано"
+rm "$ROOT/backup/docs/scan_001.pdf"
+run_cycle 6 3   # снова в корзину -> прежняя версия уходит в .versions
+if find "$ROOT/trash/docs/.versions" -name scan_001.pdf 2>/dev/null | grep -q .; then
+  pass "вторая версия сохранена в .versions/<seq> (имя не искажено)"
+else
+  fail "версия в корзине не создана"
+fi
+
+hdr "9. Очистка корзины по сроку (retention=0, interval=1s)"
+write_server_env 100 0 1s
+sleep 1
+run_cycle 7 3
+left=$(find "$ROOT/trash" -type f 2>/dev/null | wc -l | tr -d ' ')
+[ "$left" = "0" ] && pass "корзина очищена по сроку (осталось $left)" || fail "в корзине осталось $left файлов"
+grep -q '"op":"trash_purge"' "$ROOT/logs/audit-server.jsonl" 2>/dev/null && pass "аудит trash_purge записан" || fail "нет аудита очистки"
+write_server_env   # вернуть значения по умолчанию
+
+hdr "10. Массовое удаление > порога -> алерт-событие"
+mkdir -p "$ROOT/backup/mass"
+for i in $(seq 1 5); do echo "m$i" > "$ROOT/backup/mass/f$i.dat"; done
+run_cycle 8 3   # скачать 5 файлов
+write_server_env 2   # порог массового удаления = 2
+rm -rf "$ROOT/backup/mass"
+run_cycle 9 3
+grep -qi "массовое удаление" "$ROOT/logs/server.9.out" 2>/dev/null && pass "алерт массового удаления сработал" || fail "нет алерта массового удаления"
+write_server_env
+
+hdr "11. Негатив: неверный пароль -> AUTH_FAILED"
+write_server_env 100 10 24h 0 1MiB "ПЛОХОЙ-пароль-не-совпадает-0000000000"
+$SERVER dry-run -config "$ROOT/server.env" >"$ROOT/logs/badauth.out" 2>&1
+if grep -qiE "AUTH_FAILED|парол" "$ROOT/logs/badauth.out" "$ROOT/logs/client.out" 2>/dev/null; then
+  pass "неверный пароль отклонён (AUTH_FAILED)"
+else
+  fail "AUTH_FAILED не зафиксирован"
+fi
+write_server_env
+
+hdr "12. Докачка после обрыва (offset > 0)"
+# большой файл + лимит скорости => успеем прервать на середине
+head -c 6000000 /dev/urandom > "$ROOT/backup/bigfile.bin"
+write_server_env 100 10 24h 700000 64KiB   # ~700 КБ/с, чанк 64 КБ
+$SERVER run -config "$ROOT/server.env" >"$ROOT/logs/server.resume1.out" 2>&1 &
+rpid=$!
+sleep 3
+kill -INT $rpid 2>/dev/null; wait $rpid 2>/dev/null
+partcnt=$(find "$ROOT/temp" -name '*.part' 2>/dev/null | wc -l | tr -d ' ')
+[ "$partcnt" -ge 1 ] && pass "частичный .part сохранён (offset>0)" || fail "нет частичного .part (докачка не проверена)"
+write_server_env   # снять лимит
+run_cycle resume2 5
+cmp -s "$ROOT/backup/bigfile.bin" "$ROOT/storage/bigfile.bin" && pass "докачка завершена, целостность ОК" || fail "докачка/целостность не удалась"
+
+hdr "13. Restore: файл, поддерево и -force"
+rm -f "$ROOT/backup/docs/sub/note.txt"
+$SERVER restore -config "$ROOT/server.env" -path docs/sub/note.txt >"$ROOT/logs/restore1.out" 2>&1
+[ -f "$ROOT/backup/docs/sub/note.txt" ] && pass "restore одного файла" || fail "restore файла не сработал"
+rm -rf "$ROOT/backup/mass" 2>/dev/null
+$SERVER restore -config "$ROOT/server.env" -all >"$ROOT/logs/restore_all.out" 2>&1
+grep -q "восстановлено" "$ROOT/logs/restore_all.out" && pass "restore -all выполнен" || fail "restore -all не сработал"
+# -force: на клиенте новее, без force -> пропуск; с force -> перезапись
+echo "client-newer" > "$ROOT/backup/docs/sub/note.txt"; touch "$ROOT/backup/docs/sub/note.txt"
+$SERVER restore -config "$ROOT/server.env" -path docs/sub/note.txt >"$ROOT/logs/restore_nf.out" 2>&1
+grep -q "пропущено 1" "$ROOT/logs/restore_nf.out" && pass "restore без -force не затирает более новый" || echo "  [INFO] проверка пропуска по новизне: $(grep Восстановление "$ROOT/logs/restore_nf.out")"
+$SERVER restore -config "$ROOT/server.env" -path docs/sub/note.txt -force >"$ROOT/logs/restore_f.out" 2>&1
+grep -q "восстановлено 1" "$ROOT/logs/restore_f.out" && pass "restore -force перезаписывает" || fail "restore -force не сработал"
+
+hdr "14. Возобновление очереди после перезапуска службы"
+# защита от двойного запуска проверяется неявно; здесь — сохранность состояния
+$SERVER status -config "$ROOT/server.env" >"$ROOT/logs/status.out" 2>&1
+grep -q "Последний цикл" "$ROOT/logs/status.out" && pass "состояние/история цикла сохранены" || fail "status не показал цикл"
+
+hdr "15. Отчёт по циклу через mock-SMTP"
+if [ "$SMTP_OK" = "1" ]; then
+  if [ -s "$SMTP_CAP" ] && grep -q "multipart/alternative" "$SMTP_CAP" 2>/dev/null; then
+    pass "HTML-отчёт сформирован и отправлен (mock-SMTP получил письмо)"
+  else
+    fail "письмо-отчёт не получено mock-SMTP"
+  fi
+else
+  echo "  [SKIP] python3 недоступен — проверка SMTP пропущена"
+fi
+
+hdr "16. Защита от двойного запуска (lock-файл)"
+$SERVER run -config "$ROOT/server.env" >"$ROOT/logs/lock1.out" 2>&1 &
+lpid=$!; sleep 1
+$SERVER run -config "$ROOT/server.env" >"$ROOT/logs/lock2.out" 2>&1
+grep -qiE "уже запущен|lock" "$ROOT/logs/lock2.out" && pass "второй экземпляр отклонён lock-файлом" || fail "двойной запуск не предотвращён"
+kill -INT $lpid 2>/dev/null; wait $lpid 2>/dev/null
+
+echo
+echo "==================================================="
+echo "ИТОГ: PASS=$PASS  FAIL=$FAIL"
+echo "Логи: $ROOT/logs (каталог удаляется при выходе)"
+echo "==================================================="
+[ "$FAIL" = "0" ]

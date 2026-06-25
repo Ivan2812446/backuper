@@ -1,0 +1,19 @@
+[Unit]
+Description=Backuper server (TLS dialer, sync initiator)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=backuper
+Group=backuper
+EnvironmentFile=-/etc/backuper/.env
+WorkingDirectory=/var/lib/backuper
+ExecStart=/usr/local/bin/backuper-server run
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
