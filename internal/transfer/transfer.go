@@ -8,6 +8,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -19,6 +20,10 @@ import (
 	"backuper/internal/store"
 	"backuper/internal/tlsconn"
 )
+
+// ErrConnectionLost — связь с клиентом потеряна во время фазы передачи:
+// очередь прерывается, цикл продолжится со следующего планового (раздел 14 ТЗ).
+var ErrConnectionLost = errors.New("связь с клиентом потеряна во время передачи")
 
 // Config — параметры передачи.
 type Config struct {
@@ -75,6 +80,9 @@ type Manager struct {
 	res    Result
 	active int32
 	peak   int32
+
+	cancel   context.CancelFunc // отмена текущего прогона очереди
+	connLost int32              // 1 = связь с клиентом потеряна (очередь прервана)
 }
 
 // New создаёт менеджер передачи.
@@ -120,7 +128,11 @@ func absInt64(v int64) int64 {
 
 // RunDownloadQueue обрабатывает задачи скачивания (pending/in_progress) пулом из
 // Parallel соединений. Задачи подаются постранично (NFR-1). cycleID — для аудита.
-func (m *Manager) RunDownloadQueue(ctx context.Context, cycleID int64) (Result, error) {
+func (m *Manager) RunDownloadQueue(parent context.Context, cycleID int64) (Result, error) {
+	ctx, cancel := context.WithCancel(parent)
+	m.cancel = cancel
+	defer cancel()
+
 	ch := make(chan store.Task)
 	var wg sync.WaitGroup
 	workers := m.d.Cfg.Parallel
@@ -166,10 +178,13 @@ func (m *Manager) RunDownloadQueue(ctx context.Context, cycleID int64) (Result, 
 	close(ch)
 	wg.Wait()
 	m.res.PeakParallel = int(m.peak)
+	if atomic.LoadInt32(&m.connLost) == 1 {
+		return m.res, ErrConnectionLost
+	}
 	if produceErr != nil {
 		return m.res, produceErr
 	}
-	return m.res, ctx.Err()
+	return m.res, parent.Err()
 }
 
 func (m *Manager) worker(ctx context.Context, cycleID int64, ch <-chan store.Task) {
@@ -205,13 +220,12 @@ type outcome struct {
 // processTask выполняет задачу с повторными попытками (9.4, 14) и возвращает
 // соединение для повторного использования следующей задачей (или nil).
 func (m *Manager) processTask(ctx context.Context, cycleID int64, t store.Task, conn *tlsconn.Conn) *tlsconn.Conn {
-	atomic.AddInt32(&m.active, 1)
-	for {
-		cur := atomic.LoadInt32(&m.active)
-		if cur > atomic.LoadInt32(&m.peak) {
-			atomic.StoreInt32(&m.peak, cur)
+	cur := atomic.AddInt32(&m.active, 1)
+	for { // lock-free обновление пика параллельности
+		p := atomic.LoadInt32(&m.peak)
+		if cur <= p || atomic.CompareAndSwapInt32(&m.peak, p, cur) {
+			break
 		}
-		break
 	}
 	defer atomic.AddInt32(&m.active, -1)
 
@@ -220,13 +234,10 @@ func (m *Manager) processTask(ctx context.Context, cycleID int64, t store.Task, 
 
 	for {
 		if conn == nil {
-			c, err := m.d.NewConn()
+			c, err := m.dial(ctx, cycleID)
 			if err != nil {
-				// сетевой сбой соединения трактуется как неуспех попытки
-				if m.failAttempt(ctx, cycleID, &t, protocol.ErrIOError, "соединение: "+err.Error()) {
-					return nil
-				}
-				continue
+				// связь с клиентом потеряна (или отмена) — очередь прервана
+				return nil
 			}
 			conn = c
 		}
@@ -254,6 +265,47 @@ func (m *Manager) processTask(ctx context.Context, cycleID int64, t store.Task, 
 			return conn
 		}
 	}
+}
+
+// dial создаёт data-соединение с повторами. Если связь не восстановилась за
+// RetryCount попыток — это сбой уровня соединения: помечаем потерю связи,
+// прерываем всю очередь (раздел 14) и возвращаем ошибку.
+func (m *Manager) dial(ctx context.Context, cycleID int64) (*tlsconn.Conn, error) {
+	var lastErr error
+	for attempt := 1; attempt <= m.d.Cfg.RetryCount; attempt++ {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		c, err := m.d.NewConn()
+		if err == nil {
+			return c, nil
+		}
+		lastErr = err
+		m.d.Log.Warn("transfer", "подключение к клиенту не удалось (попытка %d/%d): %v",
+			attempt, m.d.Cfg.RetryCount, err)
+		if attempt < m.d.Cfg.RetryCount {
+			timer := time.NewTimer(m.d.Cfg.RetryDelay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil, ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+	// устойчивый сбой соединения — прерываем очередь, цикл продолжится со следующего планового
+	if atomic.CompareAndSwapInt32(&m.connLost, 0, 1) {
+		msg := "связь с клиентом потеряна во время передачи: " + lastErr.Error()
+		m.mu.Lock()
+		m.res.Errors = append(m.res.Errors, Err{Code: protocol.ErrIOError, Message: msg})
+		m.mu.Unlock()
+		_, _ = m.d.Store.InsertEvent(cycleID, "ERROR", "io", "", msg, time.Now().UnixNano())
+		m.d.Log.Error("transfer", "%s — очередь прервана", msg)
+		if m.cancel != nil {
+			m.cancel()
+		}
+	}
+	return nil, lastErr
 }
 
 // failAttempt фиксирует неудачу и решает, повторять или пропустить (9.4).

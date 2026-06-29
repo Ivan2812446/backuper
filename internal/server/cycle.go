@@ -205,8 +205,12 @@ func (s *Server) RunCycle(ctx context.Context) {
 
 		r, rerr := tm.RunDownloadQueue(ctx, cycleID)
 		tres = r
-		if rerr != nil && ctx.Err() != nil {
-			status = "PARTIAL"
+		if rerr != nil {
+			// потеря связи, отмена (graceful) или ошибка очереди — прерываем проходы
+			if status == "OK" {
+				status = "PARTIAL"
+			}
+			s.log.Warn("cycle", "передача прервана: %v", rerr)
 			break
 		}
 		if enq == 0 && moved == 0 {

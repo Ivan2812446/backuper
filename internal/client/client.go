@@ -90,6 +90,7 @@ func (s *Server) Run(ctx context.Context) error {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
 			conn.Close()
+			continue // не занимали слот sem — не запускаем обработчик
 		}
 		wg.Add(1)
 		go func() {

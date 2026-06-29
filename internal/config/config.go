@@ -350,6 +350,9 @@ func (c *ServerConfig) Validate() []string {
 	if c.ChunkSize <= 0 {
 		probs = append(probs, "CHUNK_SIZE должен быть > 0")
 	}
+	if c.ChunkSize > c.MaxFrameBytes {
+		probs = append(probs, "CHUNK_SIZE не должен превышать MAX_FRAME_BYTES")
+	}
 	if c.RetryCount < 1 {
 		probs = append(probs, "RETRY_COUNT должен быть ≥ 1")
 	}
@@ -412,6 +415,9 @@ func (c *ClientConfig) Validate() []string {
 	}
 	if c.ChunkSize <= 0 {
 		probs = append(probs, "CHUNK_SIZE должен быть > 0")
+	}
+	if c.ChunkSize > c.MaxFrameBytes {
+		probs = append(probs, "CHUNK_SIZE не должен превышать MAX_FRAME_BYTES")
 	}
 	return probs
 }
