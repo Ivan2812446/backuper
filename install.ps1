@@ -25,7 +25,9 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][ValidateSet('server', 'client')][string]$Role,
+    [ValidateSet('server', 'client')][string]$Role,
+    [switch]$Uninstall,
+    [switch]$Purge,
     [switch]$NonInteractive,
     [string]$OwnPassword,
     [string]$PeerPassword,
@@ -126,6 +128,27 @@ $id = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (-not (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Fail 'Запустите PowerShell от имени Администратора.'
 }
+
+# Удаление: ... -Uninstall [-Purge]
+if ($Uninstall) {
+    foreach ($r in 'server', 'client') {
+        if (Get-Service "backuper-$r" -ErrorAction SilentlyContinue) {
+            & sc.exe stop "backuper-$r" | Out-Null
+            & sc.exe delete "backuper-$r" | Out-Null
+            Ok "удалена служба backuper-$r"
+        }
+    }
+    if ($Purge) {
+        Remove-Item -Recurse -Force $installDir -ErrorAction SilentlyContinue
+        Ok "удалено полностью, включая данные: $installDir"
+    }
+    else {
+        Ok "службы удалены; файлы в $installDir СОХРАНЕНЫ."
+        Info "Удалить вместе с данными: добавьте -Purge"
+    }
+    exit 0
+}
+if (-not $Role) { Fail "укажите -Role server|client (или -Uninstall для удаления)" }
 
 Info "Установка Backuper ($Role, windows/amd64), версия $Version"
 if ($script:Interactive) { Info "Интерактивный режим: отвечайте на вопросы (Enter — значение по умолчанию)." }

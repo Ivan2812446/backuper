@@ -35,8 +35,32 @@ ok()   { printf '%s[+]%s %s\n' "$G" "$N" "$*"; }
 warn() { printf '%s[!]%s %s\n' "$Y" "$N" "$*" >&2; }
 die()  { printf '%s[x]%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
-[[ "$ROLE" == "server" || "$ROLE" == "client" ]] || die "укажите роль: server | client"
 [[ "$(id -u)" -eq 0 ]] || die "запускайте от root (sudo)."
+
+# Удаление: sudo bash install.sh uninstall [--purge]
+if [[ "$ROLE" == "uninstall" ]]; then
+	for r in server client; do
+		if [[ -f "/etc/systemd/system/backuper-$r.service" ]]; then
+			systemctl disable --now "backuper-$r" >/dev/null 2>&1 || true
+			rm -f "/etc/systemd/system/backuper-$r.service"
+			ok "удалена служба backuper-$r"
+		fi
+		[[ -f "$BIN_DIR/backuper-$r" ]] && rm -f "$BIN_DIR/backuper-$r" && ok "удалён $BIN_DIR/backuper-$r"
+	done
+	systemctl daemon-reload >/dev/null 2>&1 || true
+	if [[ "${2:-}" == "--purge" || "${PURGE:-0}" == "1" ]]; then
+		rm -rf "$CONF_DIR" "$LIB_DIR" "$LOG_DIR" /srv/backuper
+		userdel "$USER" >/dev/null 2>&1 || true
+		groupdel "$USER" >/dev/null 2>&1 || true
+		ok "полностью удалено: бинарники, службы, конфиг, данные и пользователь $USER."
+	else
+		ok "удалены бинарники и службы. Данные СОХРАНЕНЫ: $CONF_DIR, $LIB_DIR, $LOG_DIR, /srv/backuper."
+		info "Удалить вместе с данными: sudo bash install.sh uninstall --purge"
+	fi
+	exit 0
+fi
+
+[[ "$ROLE" == "server" || "$ROLE" == "client" ]] || die "укажите: server | client | uninstall"
 
 case "$(uname -m)" in
 	x86_64|amd64) ARCH=amd64 ;;
