@@ -28,6 +28,7 @@ param(
     [ValidateSet('server', 'client')][string]$Role,
     [switch]$Uninstall,
     [switch]$Purge,
+    [switch]$Update,
     [switch]$NonInteractive,
     [string]$OwnPassword,
     [string]$PeerPassword,
@@ -148,7 +149,24 @@ if ($Uninstall) {
     }
     exit 0
 }
-if (-not $Role) { Fail "укажите -Role server|client (или -Uninstall для удаления)" }
+if ($Update) {
+    foreach ($r in 'server', 'client') {
+        $rexe = Join-Path $installDir "backuper-$r.exe"
+        if (-not (Test-Path $rexe)) { continue }
+        $u = "https://github.com/$repo/releases/latest/download/backuper-$r-windows-amd64.exe"
+        Info "Обновление backuper-$r из релиза …"
+        $svcR = "backuper-$r"; $wasRunning = $false
+        $s = Get-Service $svcR -ErrorAction SilentlyContinue
+        if ($s -and $s.Status -eq 'Running') { $wasRunning = $true; & sc.exe stop $svcR | Out-Null; Start-Sleep 2 }
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $u -OutFile $rexe -UseBasicParsing
+        Ok "обновлён $rexe"
+        if ($wasRunning) { & sc.exe start $svcR | Out-Null; Ok "служба $svcR перезапущена" }
+    }
+    Ok ".env и сертификаты сохранены без изменений."
+    exit 0
+}
+if (-not $Role) { Fail "укажите -Role server|client (или -Uninstall / -Update)" }
 
 Info "Установка Backuper ($Role, windows/amd64), версия $Version"
 if ($script:Interactive) { Info "Интерактивный режим: отвечайте на вопросы (Enter — значение по умолчанию)." }

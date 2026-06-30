@@ -132,6 +132,9 @@ func cmdRun(args []string) {
 		fmt.Fprintf(os.Stderr, "ОШИБКА логирования: %v\n", err)
 		os.Exit(1)
 	}
+	for _, w := range cfg.Warnings() {
+		log.Warn("config", "%s", w)
+	}
 	tlsCfg, err := tlsconn.ListenerTLS(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.TLSCAFile, cfg.TLSMinVersion)
 	if err != nil {
 		log.Error("service", "TLS: %v", err)
@@ -166,6 +169,9 @@ func cmdCheckConfig(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("Конфигурация клиента корректна.")
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintf(os.Stderr, "ВНИМАНИЕ: %s\n", w)
+	}
 }
 
 func cmdStatus(args []string) {

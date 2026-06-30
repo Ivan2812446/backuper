@@ -199,6 +199,68 @@ func ParsePutResp(p []byte) (PutResp, error) {
 	return m, s.Err()
 }
 
+// --- GET_DELTA (0x24) ---
+
+// DeltaReq — запрос дельты: путь, размер блока и хэши блоков СТАРОЙ версии (sha256).
+type DeltaReq struct {
+	Path      string
+	BlockSize uint32
+	Hashes    [][32]byte
+}
+
+func (m DeltaReq) Encode() []byte {
+	var b Builder
+	b.Str(m.Path)
+	b.U32(m.BlockSize)
+	b.U32(uint32(len(m.Hashes)))
+	for i := range m.Hashes {
+		b.Raw(m.Hashes[i][:])
+	}
+	return b.Bytes()
+}
+
+func ParseDeltaReq(p []byte) (DeltaReq, error) {
+	s := NewScanner(p)
+	m := DeltaReq{Path: s.Str(), BlockSize: s.U32()}
+	count := s.U32()
+	if s.Err() != nil {
+		return m, s.Err()
+	}
+	m.Hashes = make([][32]byte, 0, count)
+	for i := uint32(0); i < count; i++ {
+		raw := s.Bytes(32)
+		if s.Err() != nil {
+			return m, s.Err()
+		}
+		var h [32]byte
+		copy(h[:], raw)
+		m.Hashes = append(m.Hashes, h)
+	}
+	return m, s.Err()
+}
+
+// --- DELTA_RESP (0x25) ---
+
+type DeltaResp struct {
+	Status    uint8
+	TotalSize uint64
+	Mtime     int64
+}
+
+func (m DeltaResp) Encode() []byte {
+	var b Builder
+	b.U8(m.Status)
+	b.U64(m.TotalSize)
+	b.I64(m.Mtime)
+	return b.Bytes()
+}
+
+func ParseDeltaResp(p []byte) (DeltaResp, error) {
+	s := NewScanner(p)
+	m := DeltaResp{Status: s.U8(), TotalSize: s.U64(), Mtime: s.I64()}
+	return m, s.Err()
+}
+
 // --- DISK_RESP (0x41) ---
 
 type DiskResp struct {

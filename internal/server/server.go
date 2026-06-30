@@ -83,6 +83,9 @@ func (s *Server) newTransferManager() *transfer.Manager {
 			SaveFilePerms:    os.FileMode(s.cfg.SaveFilePerms),
 			SaveDirPerms:     os.FileMode(s.cfg.SaveDirPerms),
 			MtimeToleranceNS: s.cfg.MtimeTolerance.Nanoseconds(),
+			MaxFrame:         uint64(s.cfg.MaxFrameBytes),
+			DeltaMinSize:     s.cfg.DeltaMinSize,
+			DeltaBlockSize:   s.cfg.DeltaBlockSize,
 		},
 	})
 }

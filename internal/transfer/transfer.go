@@ -6,6 +6,7 @@ package transfer
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,9 @@ type Config struct {
 	SaveFilePerms    os.FileMode
 	SaveDirPerms     os.FileMode
 	MtimeToleranceNS int64
+	MaxFrame         uint64
+	DeltaMinSize     int64 // дельта для изменённых файлов ≥ этого размера (0 — выкл.)
+	DeltaBlockSize   int64
 }
 
 // Deps — зависимости менеджера передачи.
@@ -356,6 +360,16 @@ func (m *Manager) downloadOne(ctx context.Context, cycleID int64, conn *tlsconn.
 	if err != nil {
 		return outcome{code: protocol.ErrProtocol, message: err.Error(), skipNow: true}
 	}
+
+	// Дельта-передача для изменённых файлов (есть старая копия, размер ≥ порога).
+	if m.d.Cfg.DeltaMinSize > 0 && m.d.Cfg.DeltaBlockSize > 0 {
+		if st, serr := os.Stat(target); serr == nil && !st.IsDir() && st.Size() >= m.d.Cfg.DeltaMinSize {
+			if oc, fallback := m.deltaDownload(ctx, cycleID, conn, t, target, st.Size()); !fallback {
+				return oc
+			}
+		}
+	}
+
 	part, meta := partPaths(m.d.Cfg.TempDir, rel)
 
 	var offset int64
@@ -506,4 +520,150 @@ done:
 	m.d.Log.Info("transfer", "%s %s (%d Б)", map[bool]string{false: "скачан", true: "обновлён"}[existed], rel, resp.TotalSize)
 	m.d.Log.Audit(op, rel, int64(resp.TotalSize), "ok", t.Attempts+1, cycleID)
 	return outcome{ok: true, bytes: written - offset}
+}
+
+// deltaDownload пытается получить изменённый файл дельтой (по блокам фикс. размера):
+// сервер шлёт хэши блоков СТАРОЙ копии, клиент присылает только изменённые блоки,
+// неизменённые копируются из старого файла. Возвращает (исход, fallback). Если
+// fallback=true — нужно перейти на обычное полное скачивание (клиент не поддержал
+// дельту, не читается старый файл или кадр хэшей слишком велик).
+func (m *Manager) deltaDownload(ctx context.Context, cycleID int64, conn *tlsconn.Conn, t store.Task, oldPath string, oldSize int64) (outcome, bool) {
+	rel := t.Relpath
+	bs := m.d.Cfg.DeltaBlockSize
+	nOld := (oldSize + bs - 1) / bs
+	// кадр хэшей должен помещаться в MAX_FRAME_BYTES, иначе — полное скачивание
+	if uint64(nOld)*32+uint64(len(rel))+16 > m.d.Cfg.MaxFrame {
+		return outcome{}, true
+	}
+	oldF, err := os.Open(oldPath)
+	if err != nil {
+		return outcome{}, true
+	}
+	defer oldF.Close()
+
+	hashes := make([][32]byte, 0, nOld)
+	hbuf := make([]byte, bs)
+	for i := int64(0); i < nOld; i++ {
+		bl := bs
+		if oldSize-i*bs < bl {
+			bl = oldSize - i*bs
+		}
+		n, _ := oldF.ReadAt(hbuf[:bl], i*bs)
+		if int64(n) != bl {
+			return outcome{}, true // старый файл изменился под нами — на полное скачивание
+		}
+		hashes = append(hashes, sha256.Sum256(hbuf[:bl]))
+	}
+
+	if err := conn.WriteMsg(protocol.MsgGetDelta,
+		protocol.DeltaReq{Path: rel, BlockSize: uint32(bs), Hashes: hashes}.Encode()); err != nil {
+		return outcome{dropConn: true, code: protocol.ErrIOError, message: err.Error()}, false
+	}
+	mt, payload, err := conn.ReadMsg()
+	if err != nil {
+		return outcome{dropConn: true, code: protocol.ErrIOError, message: err.Error()}, false
+	}
+	if mt == protocol.MsgError {
+		em, _ := protocol.ParseErrorMsg(payload)
+		if em.Code == protocol.ErrUnsupported {
+			return outcome{}, true // старый клиент без дельты — полное скачивание
+		}
+		return outcome{code: em.Code, message: em.Message, skipNow: em.Code == protocol.ErrNotFound}, false
+	}
+	if mt != protocol.MsgDeltaResp {
+		return outcome{dropConn: true, code: protocol.ErrProtocol, message: "ожидался DELTA_RESP"}, false
+	}
+	resp, perr := protocol.ParseDeltaResp(payload)
+	if perr != nil || resp.Status != 0 {
+		return outcome{dropConn: true, code: protocol.ErrProtocol, message: "DELTA_RESP"}, false
+	}
+
+	part, meta := partPaths(m.d.Cfg.TempDir, rel)
+	os.Remove(meta)
+	if err := os.MkdirAll(m.d.Cfg.TempDir, 0o755); err != nil {
+		return outcome{code: protocol.ErrIOError, message: err.Error()}, false
+	}
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+	if err != nil {
+		return outcome{code: protocol.ErrIOError, message: err.Error()}, false
+	}
+	total := int64(resp.TotalSize)
+	nNew := (total + bs - 1) / bs
+	var written, literal int64
+	rbuf := make([]byte, bs)
+	failClose := func(o outcome) (outcome, bool) { f.Close(); return o, false }
+	for i := int64(0); i < nNew; i++ {
+		bl := bs
+		if total-i*bs < bl {
+			bl = total - i*bs
+		}
+		bt, data, rerr := conn.ReadMsg()
+		if rerr != nil {
+			return failClose(outcome{dropConn: true, code: protocol.ErrIOError, message: rerr.Error()})
+		}
+		switch bt {
+		case protocol.MsgBlockKeep:
+			n, _ := oldF.ReadAt(rbuf[:bl], i*bs)
+			if int64(n) != bl {
+				return failClose(outcome{code: protocol.ErrIOError, message: "чтение старого блока"})
+			}
+			if _, werr := f.Write(rbuf[:bl]); werr != nil {
+				return failClose(outcome{code: protocol.ErrIOError, message: werr.Error()})
+			}
+			written += bl
+		case protocol.MsgFileData:
+			if int64(len(data)) != bl {
+				return failClose(outcome{dropConn: true, code: protocol.ErrProtocol, message: "размер литерального блока"})
+			}
+			if err := m.lim.wait(ctx, len(data)); err != nil {
+				return failClose(outcome{dropConn: true, code: protocol.ErrIOError, message: "отменено"})
+			}
+			if _, werr := f.Write(data); werr != nil {
+				return failClose(outcome{code: protocol.ErrIOError, message: werr.Error()})
+			}
+			written += bl
+			literal += bl
+		case protocol.MsgError:
+			em, _ := protocol.ParseErrorMsg(data)
+			return failClose(outcome{code: em.Code, message: em.Message})
+		default:
+			return failClose(outcome{dropConn: true, code: protocol.ErrProtocol, message: "неожиданный кадр " + protocol.MsgName(bt)})
+		}
+	}
+	mtEnd, _, eerr := conn.ReadMsg()
+	if eerr != nil {
+		return failClose(outcome{dropConn: true, code: protocol.ErrIOError, message: eerr.Error()})
+	}
+	if mtEnd != protocol.MsgFileEnd {
+		return failClose(outcome{dropConn: true, code: protocol.ErrProtocol, message: "ожидался FILE_END"})
+	}
+	if err := f.Sync(); err != nil {
+		return failClose(outcome{code: protocol.ErrIOError, message: err.Error()})
+	}
+	f.Close()
+
+	st, serr := os.Stat(part)
+	if serr != nil || st.Size() != total {
+		os.Remove(part)
+		return outcome{code: protocol.ErrSizeMismatch, message: "размер после дельты не совпал"}, false
+	}
+	if err := os.Rename(part, oldPath); err != nil {
+		return outcome{code: protocol.ErrIOError, message: "rename: " + err.Error()}, false
+	}
+	_ = os.Chmod(oldPath, m.d.Cfg.SaveFilePerms)
+	tm := time.Unix(0, resp.Mtime)
+	_ = os.Chtimes(oldPath, tm, tm)
+
+	now := time.Now().UnixNano()
+	if err := m.d.Store.UpsertFile(protocol.CleanRel(rel), protocol.NormKey(rel), total, resp.Mtime, now); err != nil {
+		return outcome{code: protocol.ErrIOError, message: "индекс: " + err.Error()}, false
+	}
+	_ = m.d.Store.MarkTaskDone(t.ID, now)
+	saved := total - literal
+	if saved < 0 {
+		saved = 0
+	}
+	m.d.Log.Info("transfer", "обновлён (delta) %s: передано %d из %d Б (сэкономлено %d)", rel, literal, total, saved)
+	m.d.Log.Audit("change", rel, total, "ok", t.Attempts+1, cycleID)
+	return outcome{ok: true, bytes: literal}, false
 }

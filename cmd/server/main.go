@@ -125,6 +125,9 @@ func cmdRun(args []string) {
 		os.Exit(1)
 	}
 	log := newLogger(cfg)
+	for _, w := range cfg.Warnings() {
+		log.Warn("config", "%s", w)
+	}
 
 	lock, err := server.AcquireLock(cfg.LockFile)
 	if err != nil {
@@ -170,6 +173,9 @@ func cmdCheckConfig(args []string) {
 		os.Exit(1)
 	}
 	fmt.Println("Конфигурация сервера корректна.")
+	for _, w := range cfg.Warnings() {
+		fmt.Fprintf(os.Stderr, "ВНИМАНИЕ: %s\n", w)
+	}
 }
 
 func cmdDryRun(args []string) {

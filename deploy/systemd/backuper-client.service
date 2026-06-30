@@ -14,6 +14,18 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=120
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+# BACKUP_DIR должен быть в ReadWritePaths (для restore). По умолчанию /data.
+ReadWritePaths=/data /var/log/backuper
 
 [Install]
 WantedBy=multi-user.target

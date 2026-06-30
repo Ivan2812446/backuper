@@ -40,6 +40,8 @@ type ServerConfig struct {
 	ChunkSize         int64
 	MaxFrameBytes     int64
 	ListBatchSize     int
+	DeltaMinSize      int64 // дельта-передача для изменённых файлов ≥ этого размера (0 — выкл.)
+	DeltaBlockSize    int64 // размер блока дельты
 
 	RetryCount int
 	RetryDelay time.Duration
@@ -178,6 +180,8 @@ func LoadServer(path string) (*ServerConfig, error) {
 		ChunkSize:         g.size("CHUNK_SIZE", 1<<20),
 		MaxFrameBytes:     g.size("MAX_FRAME_BYTES", 16<<20),
 		ListBatchSize:     g.intv("LIST_BATCH_SIZE", 10000),
+		DeltaMinSize:      g.size("DELTA_MIN_SIZE", 1<<20),
+		DeltaBlockSize:    g.size("DELTA_BLOCK_SIZE", 1<<20),
 
 		RetryCount: g.intv("RETRY_COUNT", 3),
 		RetryDelay: g.dur("RETRY_DELAY", time.Minute),
@@ -353,6 +357,13 @@ func (c *ServerConfig) Validate() []string {
 	if c.ChunkSize > c.MaxFrameBytes {
 		probs = append(probs, "CHUNK_SIZE не должен превышать MAX_FRAME_BYTES")
 	}
+	if c.DeltaMinSize > 0 {
+		if c.DeltaBlockSize <= 0 {
+			probs = append(probs, "DELTA_BLOCK_SIZE должен быть > 0 при включённой дельте")
+		} else if c.DeltaBlockSize > c.MaxFrameBytes {
+			probs = append(probs, "DELTA_BLOCK_SIZE не должен превышать MAX_FRAME_BYTES")
+		}
+	}
 	if c.RetryCount < 1 {
 		probs = append(probs, "RETRY_COUNT должен быть ≥ 1")
 	}
@@ -440,4 +451,42 @@ func (c *ClientConfig) EnsureDirs() error {
 		}
 	}
 	return nil
+}
+
+// passwordWarn возвращает рекомендацию, если пароль короче 24 символов или содержит заглушку.
+func passwordWarn(name, pw string) string {
+	if strings.Contains(pw, "ЗАМЕНИТЕ") || strings.Contains(pw, "ЗАМЕНИ") {
+		return name + " содержит значение-заглушку — замените на реальный пароль"
+	}
+	if len([]rune(pw)) < 24 {
+		return name + " короче 24 символов — рекомендуется не менее 24 (раздел 6.2 ТЗ)"
+	}
+	return ""
+}
+
+// Warnings — некритичные рекомендации (не блокируют запуск).
+func (c *ServerConfig) Warnings() []string {
+	var w []string
+	if s := passwordWarn("OWN_PASSWORD", c.OwnPassword); s != "" {
+		w = append(w, s)
+	}
+	if s := passwordWarn("PEER_PASSWORD", c.PeerPassword); s != "" {
+		w = append(w, s)
+	}
+	if c.OwnPassword != "" && c.OwnPassword == c.PeerPassword {
+		w = append(w, "OWN_PASSWORD и PEER_PASSWORD совпадают — это допустимо, только если на клиенте оба пароля тоже одинаковы")
+	}
+	return w
+}
+
+// Warnings — некритичные рекомендации для клиента.
+func (c *ClientConfig) Warnings() []string {
+	var w []string
+	if s := passwordWarn("OWN_PASSWORD", c.OwnPassword); s != "" {
+		w = append(w, s)
+	}
+	if s := passwordWarn("PEER_PASSWORD", c.PeerPassword); s != "" {
+		w = append(w, s)
+	}
+	return w
 }

@@ -345,6 +345,105 @@ func TestGetNotFoundAndTraversal(t *testing.T) {
 	}
 }
 
+// deltaRoundTrip кладёт old в хранилище (индексирует) и new в источник, ставит
+// задачу скачивания и прогоняет дельта-передачу. Возвращает результат и хранилищный путь.
+func deltaRoundTrip(t *testing.T, e *itEnv, rel string, old, neww []byte, blockSize int64) transfer.Result {
+	t.Helper()
+	now := time.Now().UnixNano()
+	sp := filepath.Join(e.storage, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(sp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sp, old, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.UpsertFile(protocol.CleanRel(rel), protocol.NormKey(rel), int64(len(old)), now-int64(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	bp := filepath.Join(e.backup, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(bp), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bp, neww, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.InsertTask(rel, "download", int64(len(neww)), 0, "pending", 1, now); err != nil {
+		t.Fatal(err)
+	}
+	mgr := transfer.New(transfer.Deps{
+		Store: e.st, Log: e.log,
+		NewConn: func() (*tlsconn.Conn, error) { return e.dialer.Dial() },
+		Cfg: transfer.Config{
+			StorageDir: e.storage, TempDir: e.temp, Parallel: 2, ChunkSize: 32 << 10,
+			RetryCount: 2, RetryDelay: 50 * time.Millisecond,
+			SaveFilePerms: 0o644, SaveDirPerms: 0o755, MtimeToleranceNS: int64(2 * time.Second),
+			MaxFrame: 16 << 20, DeltaMinSize: 1, DeltaBlockSize: blockSize,
+		},
+	})
+	res, err := mgr.RunDownloadQueue(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("RunDownloadQueue: %v", err)
+	}
+	got, rerr := os.ReadFile(sp)
+	if rerr != nil {
+		t.Fatalf("чтение результата: %v", rerr)
+	}
+	if !bytes.Equal(got, neww) {
+		t.Fatalf("после дельты содержимое %s не совпадает с новым (%d/%d байт)", rel, len(got), len(neww))
+	}
+	if res.DownloadedFiles != 1 {
+		t.Fatalf("DownloadedFiles=%d, want 1", res.DownloadedFiles)
+	}
+	return res
+}
+
+func filled(n int, b byte) []byte { return bytes.Repeat([]byte{b}, n) }
+
+func TestDeltaDownload(t *testing.T) {
+	e := setupIT(t, false)
+	bs := int64(1024)
+
+	t.Run("append", func(t *testing.T) {
+		old := filled(4096, 'A')
+		neww := append(append([]byte{}, old...), filled(2048, 'B')...)
+		res := deltaRoundTrip(t, e, "append.bin", old, neww, bs)
+		// первые 4 блока сохранены, переданы ~2 КБ
+		if res.DownloadedBytes > 4096 {
+			t.Errorf("дозапись: передано слишком много (%d Б), дельта не сэкономила", res.DownloadedBytes)
+		}
+	})
+
+	t.Run("inplace-edit", func(t *testing.T) {
+		old := filled(8192, 'X')
+		neww := append([]byte{}, old...)
+		for i := 1500; i < 1600; i++ {
+			neww[i] = 'Y'
+		}
+		deltaRoundTrip(t, e, "edit.bin", old, neww, bs)
+	})
+
+	t.Run("identical", func(t *testing.T) {
+		old := filled(5000, 'Z')
+		neww := append([]byte{}, old...)
+		res := deltaRoundTrip(t, e, "same.bin", old, neww, bs)
+		if res.DownloadedBytes != 0 {
+			t.Errorf("идентичный файл: ожидалось 0 переданных байт, получено %d", res.DownloadedBytes)
+		}
+	})
+
+	t.Run("shrink", func(t *testing.T) {
+		old := filled(8192, 'Q')
+		neww := old[:2500]
+		deltaRoundTrip(t, e, "shrink.bin", old, append([]byte{}, neww...), bs)
+	})
+
+	t.Run("grow-from-small", func(t *testing.T) {
+		old := filled(100, 'M')
+		neww := filled(9000, 'N')
+		deltaRoundTrip(t, e, "grow.bin", old, neww, bs)
+	})
+}
+
 func TestRestorePUT(t *testing.T) {
 	e := setupIT(t, false)
 	content := bytes.Repeat([]byte("restore-data\n"), 5000)

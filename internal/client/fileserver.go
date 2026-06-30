@@ -6,6 +6,7 @@ package client
 import (
 	"context"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -115,6 +116,65 @@ func (s *Server) handleGet(ctx context.Context, conn *tlsconn.Conn, req protocol
 		if rerr != nil {
 			_ = conn.SendError(protocol.ErrIOError, "чтение %s: %v", req.Path, rerr)
 			return rerr
+		}
+	}
+	return conn.WriteMsg(protocol.MsgFileEnd, nil)
+}
+
+// handleDelta отдаёт изменённый файл дельтой: для каждого блока новой версии
+// сравнивает его sha256 с присланным хэшем блока старой версии и шлёт либо
+// BLOCK_KEEP (блок не изменился), либо FILE_DATA (литеральные байты блока).
+func (s *Server) handleDelta(ctx context.Context, conn *tlsconn.Conn, req protocol.DeltaReq) error {
+	full, err := protocol.SafeJoin(s.cfg.BackupDir, req.Path)
+	if err != nil {
+		return conn.SendError(protocol.ErrProtocol, "delta path: %v", err)
+	}
+	bs := int64(req.BlockSize)
+	if bs <= 0 {
+		return conn.SendError(protocol.ErrProtocol, "delta block_size")
+	}
+	f, err := os.Open(full)
+	if err != nil {
+		return conn.SendError(mapOpenErr(err), "%s: %v", req.Path, err)
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return conn.SendError(protocol.ErrIOError, "stat %s: %v", req.Path, err)
+	}
+	if st.IsDir() {
+		return conn.SendError(protocol.ErrNotFound, "%s — директория", req.Path)
+	}
+	total := st.Size()
+	mtime := st.ModTime().UnixNano()
+	if err := conn.WriteMsg(protocol.MsgDeltaResp,
+		protocol.DeltaResp{Status: 0, TotalSize: uint64(total), Mtime: mtime}.Encode()); err != nil {
+		return err
+	}
+	nNew := (total + bs - 1) / bs
+	buf := make([]byte, bs)
+	for i := int64(0); i < nNew; i++ {
+		bl := bs
+		if total-i*bs < bl {
+			bl = total - i*bs
+		}
+		n, rerr := f.ReadAt(buf[:bl], i*bs)
+		if int64(n) != bl {
+			_ = conn.SendError(protocol.ErrIOError, "чтение блока %s: %v", req.Path, rerr)
+			return io.ErrUnexpectedEOF
+		}
+		h := sha256.Sum256(buf[:bl])
+		if i < int64(len(req.Hashes)) && h == req.Hashes[i] {
+			if err := conn.WriteMsg(protocol.MsgBlockKeep, nil); err != nil {
+				return err
+			}
+		} else {
+			if err := s.lim.wait(ctx, int(bl)); err != nil {
+				return err
+			}
+			if err := conn.WriteMsg(protocol.MsgFileData, buf[:bl]); err != nil {
+				return err
+			}
 		}
 	}
 	return conn.WriteMsg(protocol.MsgFileEnd, nil)

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+#
+# scripts/loadtest — сквозной нагрузочный тест: создаёт N файлов на клиенте,
+# выполняет полный цикл бэкапа и измеряет время, скорость и пиковую память служб.
+#
+# Использование:  scripts/loadtest [N]      (по умолчанию N=100000)
+#
+set -u
+export GOROOT="${GOROOT:-/home/ivan/go-sdk}"; export PATH="$GOROOT/bin:$PATH"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$REPO"
+N="${1:-100000}"
+ROOT="$(mktemp -d "${TMPDIR:-/tmp}/backuper-load.XXXXXX")"
+PORT=$(( (RANDOM % 2000) + 21000 ))
+cleanup(){ [ -n "${CPID:-}" ] && kill -INT "$CPID" 2>/dev/null; [ -n "${SPID:-}" ] && kill -INT "$SPID" 2>/dev/null; wait 2>/dev/null; rm -rf "$ROOT"; }
+trap cleanup EXIT
+mkdir -p "$ROOT"/{backup,storage,trash,temp,state,logs,certs}
+
+echo "### Сборка"
+go build -o bin/backuper-server ./cmd/server && go build -o bin/backuper-client ./cmd/client || { echo "сборка не удалась"; exit 1; }
+S=./bin/backuper-server; C=./bin/backuper-client
+
+echo "### Создание $N файлов на клиенте"
+ndirs=$(( N/1000 + 1 ))
+for ((d=0; d<ndirs; d++)); do mkdir -p "$ROOT/backup/d$(printf '%04d' $d)"; done
+t0=$(date +%s)
+seq 0 $((N-1)) | awk -v R="$ROOT/backup" '{printf "%s/d%04d/f%07d\n", R, int($1/1000), $1}' | xargs -P8 -n2000 touch
+t1=$(date +%s)
+created=$(find "$ROOT/backup" -type f | wc -l)
+echo "создано $created файлов за $((t1-t0)) c"
+
+"$S" gen-certs -out "$ROOT/certs" -client-host 127.0.0.1 -server-host 127.0.0.1 >/dev/null 2>&1
+cat > "$ROOT/server.env" <<EOF
+CLIENT_HOST=127.0.0.1
+CLIENT_PORT=$PORT
+TLS_CERT_FILE=$ROOT/certs/server.crt
+TLS_KEY_FILE=$ROOT/certs/server.key
+TLS_CA_FILE=$ROOT/certs/ca.crt
+OWN_PASSWORD=server-secret-password-0123456789
+PEER_PASSWORD=client-secret-password-0123456789
+STORAGE_DIR=$ROOT/storage
+TRASH_DIR=$ROOT/trash
+TEMP_DIR=$ROOT/temp
+STATE_DB=$ROOT/state/state.db
+LOCK_FILE=$ROOT/state/backuper.lock
+LOG_DIR=$ROOT/logs
+SYNC_INTERVAL=24h
+PARALLEL_TRANSFERS=8
+CHUNK_SIZE=256KiB
+LIST_BATCH_SIZE=10000
+SMTP_HOST=127.0.0.1
+SMTP_PORT=2
+SMTP_FROM=a@b.c
+SMTP_TO=x@y.z
+SMTP_SECURITY=none
+LOG_LEVEL=WARN
+EOF
+cat > "$ROOT/client.env" <<EOF
+LISTEN_HOST=127.0.0.1
+LISTEN_PORT=$PORT
+TLS_CERT_FILE=$ROOT/certs/client.crt
+TLS_KEY_FILE=$ROOT/certs/client.key
+TLS_CA_FILE=$ROOT/certs/ca.crt
+OWN_PASSWORD=client-secret-password-0123456789
+PEER_PASSWORD=server-secret-password-0123456789
+BACKUP_DIR=$ROOT/backup
+MAX_CONNECTIONS=16
+LOG_LEVEL=WARN
+EOF
+
+hwm(){ awk '/VmHWM/{print $2" "$3}' "/proc/$1/status" 2>/dev/null; }
+
+echo "### Запуск клиента и сервера"
+"$C" run -config "$ROOT/client.env" >"$ROOT/logs/client.out" 2>&1 & CPID=$!
+sleep 2
+"$S" run -config "$ROOT/server.env" >"$ROOT/logs/server.out" 2>&1 & SPID=$!
+
+echo "### Бэкап (ожидание завершения)"
+tstart=$(date +%s)
+peak_s=0; peak_c=0
+last=0
+while :; do
+  cnt=$(find "$ROOT/storage" -type f 2>/dev/null | wc -l)
+  s_rss=$(awk '/VmHWM/{print $2}' "/proc/$SPID/status" 2>/dev/null || echo 0)
+  c_rss=$(awk '/VmHWM/{print $2}' "/proc/$CPID/status" 2>/dev/null || echo 0)
+  [ "${s_rss:-0}" -gt "$peak_s" ] && peak_s=$s_rss
+  [ "${c_rss:-0}" -gt "$peak_c" ] && peak_c=$c_rss
+  [ "$cnt" -ge "$N" ] && break
+  now=$(date +%s)
+  if [ $((now-tstart)) -gt 900 ]; then echo "ТАЙМАУТ: скачано $cnt из $N"; break; fi
+  if [ $(( (now-tstart) % 5 )) -eq 0 ] && [ "$cnt" != "$last" ]; then printf '\r  %d / %d (%.0f%%)   ' "$cnt" "$N" "$(awk "BEGIN{print $cnt*100/$N}")"; last=$cnt; fi
+  sleep 1
+done
+tend=$(date +%s)
+echo
+final=$(find "$ROOT/storage" -type f | wc -l)
+dur=$((tend-tstart)); [ "$dur" -lt 1 ] && dur=1
+
+echo
+echo "==================================================="
+echo "Файлов:           $final / $N"
+echo "Время бэкапа:     ${dur} c"
+echo "Скорость:         $(( final / dur )) файлов/с"
+echo "Пик RSS сервера:  $(( peak_s / 1024 )) MiB"
+echo "Пик RSS клиента:  $(( peak_c / 1024 )) MiB"
+echo "==================================================="
+[ "$final" -ge "$N" ] && echo "РЕЗУЛЬТАТ: PASS" || { echo "РЕЗУЛЬТАТ: FAIL (не все файлы)"; exit 1; }

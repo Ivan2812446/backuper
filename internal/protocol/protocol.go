@@ -24,6 +24,9 @@ const (
 	MsgGetResp   byte = 0x21
 	MsgFileData  byte = 0x22
 	MsgFileEnd   byte = 0x23
+	MsgGetDelta  byte = 0x24 // S→C: запрос дельты с хэшами блоков старой версии
+	MsgDeltaResp byte = 0x25 // C→S: метаданные дельты (status,total,mtime)
+	MsgBlockKeep byte = 0x26 // C→S: очередной блок не изменился (копировать из старого)
 	MsgPutReq    byte = 0x30
 	MsgPutResp   byte = 0x31
 	MsgDiskReq   byte = 0x40
@@ -66,6 +69,12 @@ func MsgName(t byte) string {
 		return "FILE_DATA"
 	case MsgFileEnd:
 		return "FILE_END"
+	case MsgGetDelta:
+		return "GET_DELTA"
+	case MsgDeltaResp:
+		return "DELTA_RESP"
+	case MsgBlockKeep:
+		return "BLOCK_KEEP"
 	case MsgPutReq:
 		return "PUT_REQ"
 	case MsgPutResp:
@@ -250,6 +259,16 @@ func (s *Scanner) U64() uint64 {
 }
 
 func (s *Scanner) I64() int64 { return int64(s.U64()) }
+
+// Bytes возвращает n сырых байт полезной нагрузки (срез исходного буфера).
+func (s *Scanner) Bytes(n int) []byte {
+	if !s.need(n) {
+		return nil
+	}
+	v := s.b[s.pos : s.pos+n]
+	s.pos += n
+	return v
+}
 
 func (s *Scanner) Str() string {
 	n := s.U32()

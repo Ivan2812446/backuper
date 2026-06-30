@@ -161,6 +161,12 @@ func (s *Server) dispatch(ctx context.Context, conn *tlsconn.Conn, mt byte, payl
 			return conn.SendError(protocol.ErrProtocol, "GET_REQ: %v", err)
 		}
 		return s.handleGet(ctx, conn, req)
+	case protocol.MsgGetDelta:
+		req, err := protocol.ParseDeltaReq(payload)
+		if err != nil {
+			return conn.SendError(protocol.ErrProtocol, "GET_DELTA: %v", err)
+		}
+		return s.handleDelta(ctx, conn, req)
 	case protocol.MsgPutReq:
 		req, err := protocol.ParsePutReq(payload)
 		if err != nil {

@@ -37,6 +37,38 @@ die()  { printf '%s[x]%s %s\n' "$R" "$N" "$*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "запускайте от root (sudo)."
 
+case "$(uname -m)" in
+	x86_64|amd64) ARCH=amd64 ;;
+	aarch64|arm64) ARCH=arm64 ;;
+	*) ARCH="" ;; # для uninstall арх не важен; для install/update проверим ниже
+esac
+
+# Обновление бинарника из последнего релиза: sudo bash install.sh update [server|client]
+if [[ "$ROLE" == "update" ]]; then
+	[[ -n "$ARCH" ]] || die "неподдерживаемая архитектура: $(uname -m)"
+	target="${2:-}"; found=0
+	for r in server client; do
+		[[ -n "$target" && "$target" != "$r" ]] && continue
+		[[ -f "$BIN_DIR/backuper-$r" ]] || continue
+		found=1
+		url="https://github.com/${REPO}/releases/latest/download/backuper-$r-linux-$ARCH"
+		info "Обновление backuper-$r из релиза …"
+		tmp="$(mktemp)"
+		if command -v curl >/dev/null 2>&1; then curl -fSL --retry 3 -o "$tmp" "$url"
+		elif command -v wget >/dev/null 2>&1; then wget -O "$tmp" "$url"
+		else rm -f "$tmp"; die "нужен curl или wget"; fi
+		[[ "$(wc -c <"$tmp")" -gt 1000000 ]] || { rm -f "$tmp"; die "скачанный файл повреждён/не найден"; }
+		install -m 0755 -o root -g root "$tmp" "$BIN_DIR/backuper-$r"; rm -f "$tmp"
+		ok "обновлён $BIN_DIR/backuper-$r"
+		if systemctl is-active "backuper-$r" >/dev/null 2>&1; then
+			systemctl restart "backuper-$r" && ok "служба backuper-$r перезапущена" || warn "не удалось перезапустить backuper-$r"
+		fi
+	done
+	[[ $found -eq 1 ]] || die "не найдено установленных бинарников для обновления в $BIN_DIR"
+	ok ".env и сертификаты сохранены без изменений."
+	exit 0
+fi
+
 # Удаление: sudo bash install.sh uninstall [--purge]
 if [[ "$ROLE" == "uninstall" ]]; then
 	for r in server client; do
@@ -60,13 +92,8 @@ if [[ "$ROLE" == "uninstall" ]]; then
 	exit 0
 fi
 
-[[ "$ROLE" == "server" || "$ROLE" == "client" ]] || die "укажите: server | client | uninstall"
-
-case "$(uname -m)" in
-	x86_64|amd64) ARCH=amd64 ;;
-	aarch64|arm64) ARCH=arm64 ;;
-	*) die "неподдерживаемая архитектура: $(uname -m)" ;;
-esac
+[[ "$ROLE" == "server" || "$ROLE" == "client" ]] || die "укажите: server | client | uninstall | update"
+[[ -n "$ARCH" ]] || die "неподдерживаемая архитектура: $(uname -m)"
 
 # ---------------------------------------------------------------------------
 # Интерактивный ввод. При curl|bash stdin занят скриптом, поэтому читаем из
@@ -342,7 +369,17 @@ if [[ "$ROLE" == "server" && ! -f "$CERTS_DIR/ca.crt" ]]; then
 	fi
 fi
 
-# 5. systemd-юнит
+# 5. systemd-юнит (с усилением безопасности и ReadWritePaths по реальным путям из .env)
+get_env_val() { grep -E "^$1=" "$ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
+declare -a RWP
+if [[ "$ROLE" == server ]]; then
+	RWP=("$(get_env_val STORAGE_DIR)" "$(get_env_val TRASH_DIR)" "$(get_env_val TEMP_DIR)" "$LIB_DIR" "$LOG_DIR")
+else
+	RWP=("$(get_env_val BACKUP_DIR)" "$LOG_DIR")
+fi
+rwp=""
+for p in "${RWP[@]}"; do [[ -n "$p" ]] && rwp+="${rwp:+ }$p"; done
+
 cat > "/etc/systemd/system/backuper-${ROLE}.service" <<EOF
 [Unit]
 Description=Backuper ${ROLE}
@@ -360,6 +397,17 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=120
 NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+ReadWritePaths=$rwp
 
 [Install]
 WantedBy=multi-user.target
