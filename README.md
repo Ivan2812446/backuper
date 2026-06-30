@@ -78,7 +78,14 @@ curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.s
 Можно запускать и без переменных — установщик всё поставит и подскажет, что
 дописать в `/etc/backuper/.env`. (`wget` тоже поддерживается вместо `curl`.)
 
-### Windows 10+ (PowerShell от администратора)
+### Windows 10+ — установщик .exe (рекомендуется)
+
+Скачайте **[backuper-setup.exe](https://github.com/Ivan2812446/backuper/releases/latest/download/backuper-setup-windows-amd64.exe)**
+и запустите от имени администратора (правый клик → «Запуск от имени администратора»).
+Мастер спросит роль (сервер/клиент) и все параметры, скачает нужный бинарник,
+сгенерирует сертификаты (на сервере), пропишет `.env` и зарегистрирует/запустит службу.
+
+### Windows 10+ — через PowerShell (альтернатива)
 
 ```powershell
 iwr https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.ps1 -OutFile "$env:TEMP\binst.ps1"
@@ -248,7 +255,14 @@ to the same directory on the client, then `systemctl enable --now backuper-clien
 You may also run it without env vars — the installer sets everything up and tells
 you what to fill into `/etc/backuper/.env`. (`wget` works too if `curl` is absent.)
 
-### Windows 10+ (PowerShell as Administrator)
+### Windows 10+ — .exe installer (recommended)
+
+Download **[backuper-setup.exe](https://github.com/Ivan2812446/backuper/releases/latest/download/backuper-setup-windows-amd64.exe)**
+and run it as Administrator. The wizard asks for the role and all settings, downloads
+the right binary, generates certificates (on the server), writes `.env` and
+registers/starts the Windows service.
+
+### Windows 10+ — via PowerShell (alternative)
 
 ```powershell
 iwr https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.ps1 -OutFile "$env:TEMP\binst.ps1"

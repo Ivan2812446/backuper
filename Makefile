@@ -28,10 +28,11 @@ build:
 	$(GO) build -o $(BIN_DIR)/backuper-server $(SERVER_PKG)
 	$(GO) build -o $(BIN_DIR)/backuper-client $(CLIENT_PKG)
 
-# Cross-compile Windows .exe binaries into ./bin
+# Cross-compile Windows .exe binaries into ./bin (включая графический установщик)
 build-windows:
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BIN_DIR)/backuper-server.exe $(SERVER_PKG)
 	GOOS=windows GOARCH=amd64 $(GO) build -o $(BIN_DIR)/backuper-client.exe $(CLIENT_PKG)
+	GOOS=windows GOARCH=amd64 $(GO) build -o $(BIN_DIR)/backuper-setup.exe ./cmd/setup
 
 # Run go vet on all packages
 vet:
