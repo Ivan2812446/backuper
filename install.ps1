@@ -205,6 +205,11 @@ if ($writeEnv) {
         $bw = Ask "BANDWIDTH_LIMIT — лимит скорости, байт/с (0 — без лимита; можно 10MB)." "0"
         $tlsMin = AskChoice "TLS_MIN_VERSION — минимальная версия TLS." "1.2" @("1.2", "1.3")
         $logLevel = AskChoice "LOG_LEVEL — уровень логирования." "INFO" @("INFO", "DEBUG", "WARN", "ERROR")
+        if (YesNo "Включить дельта-передачу изменённых файлов (экономит трафик)?" 'y') {
+            $deltaMin = AskChoice "DELTA_MIN_SIZE — применять дельту для изменённых файлов не меньше этого размера." "1MiB" @("512KiB", "1MiB", "10MiB", "100MiB")
+            $deltaBlk = AskChoice "DELTA_BLOCK_SIZE — размер блока сравнения." "1MiB" @("256KiB", "1MiB", "4MiB")
+        }
+        else { $deltaMin = "0"; $deltaBlk = "1MiB" }
 
         Write-Host ""; Info "Почта для алертов (SMTP)."
         if (YesNo "Настроить отправку e-mail алертов сейчас?" 'y') {
@@ -238,6 +243,8 @@ TEMP_DIR=$tempDir
 SYNC_INTERVAL=$syncInterval
 PARALLEL_TRANSFERS=$parallel
 BANDWIDTH_LIMIT=$bw
+DELTA_MIN_SIZE=$deltaMin
+DELTA_BLOCK_SIZE=$deltaBlk
 TRASH_RETENTION_DAYS=$retention
 SMTP_HOST=$smtpHost
 SMTP_PORT=$smtpPort

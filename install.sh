@@ -270,6 +270,12 @@ if [[ $write_env -eq 1 ]]; then
 		ask BANDWIDTH_LIMIT "BANDWIDTH_LIMIT — лимит скорости, байт/с (0 — без лимита; можно 10MB, 1MiB)." "0"
 		ask_choice TLS_MIN_VERSION "TLS_MIN_VERSION — минимальная версия TLS." "1.2" "1.2" "1.3"
 		ask_choice LOG_LEVEL "LOG_LEVEL — уровень логирования." "INFO" "INFO" "DEBUG" "WARN" "ERROR"
+		if [[ -z "${DELTA_MIN_SIZE:-}" ]] && { [[ $interactive -ne 1 ]] || yesno "Включить дельта-передачу изменённых файлов (экономит трафик при дозаписи/правках)?" y; }; then
+			ask_choice DELTA_MIN_SIZE "DELTA_MIN_SIZE — применять дельту для изменённых файлов не меньше этого размера." "1MiB" "512KiB" "1MiB" "10MiB" "100MiB"
+			ask_choice DELTA_BLOCK_SIZE "DELTA_BLOCK_SIZE — размер блока сравнения." "1MiB" "256KiB" "1MiB" "4MiB"
+		else
+			DELTA_MIN_SIZE="${DELTA_MIN_SIZE:-0}"; DELTA_BLOCK_SIZE="${DELTA_BLOCK_SIZE:-1MiB}"
+		fi
 		echo; info "Почта для алертов (SMTP)."
 		if envset SMTP_HOST || { [[ $interactive -eq 1 ]] && yesno "Настроить отправку e-mail алертов сейчас?" y; }; then
 			ask_required SMTP_HOST "SMTP_HOST — адрес SMTP-сервера (напр. smtp.gmail.com)."
@@ -301,6 +307,8 @@ TEMP_DIR=$TEMP_DIR
 SYNC_INTERVAL=$SYNC_INTERVAL
 PARALLEL_TRANSFERS=$PARALLEL_TRANSFERS
 BANDWIDTH_LIMIT=$BANDWIDTH_LIMIT
+DELTA_MIN_SIZE=$DELTA_MIN_SIZE
+DELTA_BLOCK_SIZE=$DELTA_BLOCK_SIZE
 TRASH_RETENTION_DAYS=$TRASH_RETENTION_DAYS
 SMTP_HOST=$SMTP_HOST
 SMTP_PORT=$SMTP_PORT

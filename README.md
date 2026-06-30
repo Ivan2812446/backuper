@@ -20,6 +20,7 @@
 - **Корзина:** удалённые на клиенте файлы переносятся в `TRASH_DIR` с сохранением пути,
   прежние версии — в `.versions/<seq>/`, авто-очистка через N дней.
 - **Докачка** с места обрыва, персистентная очередь задач (переживает перезапуск).
+- **Дельта-передача** изменённых файлов по блокам (передаются только изменённые блоки; экономит трафик при дозаписи/правках), с откатом на полное скачивание.
 - **Проверка целостности** по совпадению размера в байтах; повтор и пропуск с алертом.
 - **TLS 1.2+/mTLS** по общему CA + обмен паролями.
 - **Параллельная передача** пулом соединений, общий лимит скорости (token-bucket).
@@ -97,7 +98,19 @@ cp .env.server.example /etc/backuper/.env   # заполнить
 backuper-server check-config && backuper-server dry-run
 ```
 
-Подробное руководство (обновление, ротация ключей, ручной перенос 4 ТБ) — [DEPLOY.md](DEPLOY.md).
+### Обновление и удаление
+
+```bash
+# обновить бинарник из последнего релиза (.env и сертификаты сохраняются):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s update
+# удалить (службы и бинарники; данные сохранить):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s uninstall
+# удалить полностью (вместе с конфигом, данными и пользователем):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s uninstall --purge
+```
+Windows: `install.ps1 -Update` | `-Uninstall [-Purge]`.
+
+Подробное руководство (ротация ключей, ручной перенос 4 ТБ) — [DEPLOY.md](DEPLOY.md).
 
 ## CLI
 
@@ -179,6 +192,7 @@ Designed for scale: ~**1M files / 4 TB** without loading the whole index into me
 - **Trash:** files deleted on the client are moved to `TRASH_DIR` keeping their path,
   previous versions go to `.versions/<seq>/`, auto-purged after N days.
 - **Resumable** transfers with a persistent task queue (survives restarts).
+- **Delta sync** for changed files (only changed fixed-size blocks are sent; saves bandwidth on appends/in-place edits), with fallback to full download.
 - **Integrity** by byte-size match; retry then skip-with-alert on mismatch.
 - **TLS 1.2+/mTLS** via a shared CA + password exchange.
 - **Parallel transfers** over a connection pool with a shared bandwidth token-bucket.
@@ -252,7 +266,19 @@ cp .env.server.example /etc/backuper/.env   # fill in
 backuper-server check-config && backuper-server dry-run
 ```
 
-Full guide (upgrades, key rotation, the 4 TB manual seed) — [DEPLOY.md](DEPLOY.md).
+### Update and uninstall
+
+```bash
+# update the binary from the latest release (.env and certs are kept):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s update
+# remove services and binaries (keep data):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s uninstall
+# remove everything (config, data, user):
+curl -fsSL https://raw.githubusercontent.com/Ivan2812446/backuper/main/install.sh | sudo bash -s uninstall --purge
+```
+Windows: `install.ps1 -Update` | `-Uninstall [-Purge]`.
+
+Full guide (key rotation, the 4 TB manual seed) — [DEPLOY.md](DEPLOY.md).
 
 ## CLI
 
